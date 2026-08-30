@@ -4,46 +4,8 @@
 Eine webbasierte Open-Source-Plattform für lokale Viertel- und Garagenflohmärkte. Die Anwendung ermöglicht es Nachbarn, ihre Stände unkompliziert über eine interaktive Karte anzumelden, und bietet Administratoren ein übersichtliches CMS zur Verwaltung.
 
 ## 📱 App-Vorschau
-<style>
-    .photo-grid {
-    display: grid;
-    /* Standard für Desktop: Exakt 4 Spalten nebeneinander */
-    grid-template-columns: repeat(4, 1fr);
-    gap: 15px;
-    padding: 20px;
-    max-width: 1200px;
-    margin: 0 auto;
-}
 
-.photo-item img {
-    width: 100%;
-    height: auto;
-    border-radius: 8px;
-    box-shadow: 0 4px 8px rgba(0,0,0,0.1);
-    display: block;
-}
-
-/* Automatischer Sprung bei kleineren Bildschirmen / Handys */
-@media (max-width: 900px) {
-    .photo-grid {
-        /* Ab 900px Bildschirmbreite wechselt es automatisch zu 2x2 */
-        grid-template-columns: repeat(2, 1fr);
-    }
-}
-
-@media (max-width: 500px) {
-    .photo-grid {
-        /* Auf Handys unter 500px springt es automatisch auf 1 Bild pro Zeile untereinander */
-        grid-template-columns: 1fr;
-    }
-}
-</style>
-<div class="photo-grid">
-    <div class="photo-item"><img src="screenshots/karte.png" alt="Karte"></div>
-    <div class="photo-item"><img src="screenshots/anmedlung.png" alt="Anmeldung"></div>
-    <div class="photo-item"><img src="screenshots/karte-cms.png" alt="Admin CMS"></div>
-    <div class="photo-item"><img src="screenshots/einstellungen.png" alt="Ansicht"></div>
-</div>
+<img src="screenshots/karte.png" width="45%"></img> <img src="screenshots/anmedlung.png" width="45%"></img> <img src="hscreenshots/karte-cms.png" width="45%"></img> <img src="creenshots/einstellungen.png" width="45%"></img> 
 
 ---
 
