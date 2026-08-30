@@ -5,7 +5,7 @@ Eine webbasierte Open-Source-Plattform für lokale Viertel- und Garagenflohmärk
 
 ## 📱 App-Vorschau
 
-<img src="screenshots/karte.png" width="45%"></img> <img src="screenshots/anmedlung.png" width="45%"></img> <img src="hscreenshots/karte-cms.png" width="45%"></img> <img src="creenshots/einstellungen.png" width="45%"></img> 
+<img src="screenshots/karte.png" width="45%"></img> <img src="screenshots/anmeldung.png" width="45%"></img> <img src="screenshots/karte-cms.png" width="45%"></img> <img src="screenshots/einstellungen.png" width="45%"></img> 
 
 ---
 
