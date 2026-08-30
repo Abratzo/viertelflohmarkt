@@ -242,7 +242,7 @@ $staende = $pdo->query("SELECT * FROM flohmarkt_staende ORDER BY created_at DESC
 
     <!-- Spenden-Hinweis am Ende des Admin-Menüs -->
     <div class="admin-footer-donation">
-        Wenn dir die App gefällt, <a href="https://de.wikipedia.org/wiki/Gemeinnützigkeit" target="_blank">spende diesem Verein statt mir etwas :)</a>
+        Wenn dir die App gefällt, <a href="https://www.ow-gernsheim.de/" target="_blank">spende der Offenen Werkstatt Gernsheim e.V. statt mir etwas :)</a>
     </div>
 </div>
 </body>

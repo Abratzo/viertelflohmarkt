@@ -245,7 +245,7 @@ $captcha_question = "$num1 + $num2";
             <button type="button" class="toggle-info-btn" id="toggleInfoBtn" onclick="toggleInfoBox()">Info ausblenden</button>
         </div>
         <div id="map"></div>
-        <a href="https://github.com" target="_blank" class="app-attribution">ViertelFlohmarkt App</a>
+        <a href="https://github.com/Abratzo/viertelflohmarkt/" target="_blank" class="app-attribution">ViertelFlohmarkt App</a>
     </div>
     
     <script>
