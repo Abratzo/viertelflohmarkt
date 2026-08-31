@@ -1,19 +1,155 @@
 <?php
 // config.php - Datenbank- und Systemkonfiguration
 
-$db_host = 'localhost';       
-$db_name = 'w01b646e';        // Dein DB-Name
-$db_user = 'w01b646e';        // Dein DB-Nutzer
-$db_pass = 'DEIN_DATENBANK_PASSWORT';   // <-- Hier dein DB-Passwort
- 
-$admin_pass = 'flohmarkt2026';           // <-- Hier dein Passwort für die admin.php
+if (basename($_SERVER['SCRIPT_FILENAME'] ?? '') === basename(__FILE__)) {
+    http_response_code(403);
+    die('Direkter Zugriff nicht erlaubt.');
+}
 
+if (session_status() === PHP_SESSION_NONE) {
+    session_start();
+}
 
+$app_domain = 'www.DEINE-DOMAIN.de'; 
+
+$db_host = 'localhost';
+$db_name = 'DB_NAME';        // Dein DB-Name
+$db_user = 'DB-NUTZER';        // Dein DB-Nutzer
+$db_pass = 'DB-PASS';   // <-- Hier dein DB-Passwort 
+
+// --- CSRF-SCHUTZ ---
+if (empty($_SESSION['csrf_token'])) {
+    $_SESSION['csrf_token'] = bin2hex(random_bytes(32));
+}
+
+function csrf_token(): string {
+    return $_SESSION['csrf_token'];
+}
+
+function csrf_field(): string {
+    return '<input type="hidden" name="csrf_token" value="' . htmlspecialchars(csrf_token(), ENT_QUOTES) . '">';
+}
+
+function csrf_verify(): bool {
+    $token = $_POST['csrf_token'] ?? '';
+    return is_string($token) && $token !== '' && isset($_SESSION['csrf_token'])
+        && hash_equals($_SESSION['csrf_token'], $token);
+}
+
+function csrf_require(): void {
+    if (!csrf_verify()) {
+        http_response_code(403);
+        die('Sicherheitsprüfung fehlgeschlagen. Bitte lade die Seite neu.');
+    }
+}
+
+// --- LOGIN-SCHUTZ (Rate-Limiting) ---
+function flohmarkt_client_ip(): string {
+    return $_SERVER['REMOTE_ADDR'] ?? '0.0.0.0';
+}
+
+function flohmarkt_login_is_locked(PDO $pdo, string $ip): ?DateTime {
+    $stmt = $pdo->prepare("SELECT locked_until FROM flohmarkt_login_attempts WHERE ip = ?");
+    $stmt->execute([$ip]);
+    $row = $stmt->fetch();
+
+    if ($row && !empty($row['locked_until'])) {
+        $tz = new DateTimeZone('Europe/Berlin');
+        $locked = DateTime::createFromFormat('Y-m-d H:i:s', $row['locked_until'], $tz);
+        $now = new DateTime('now', $tz);
+        if ($locked && $now < $locked) {
+            return $locked;
+        }
+    }
+    return null;
+}
+
+function flohmarkt_login_register_failure(PDO $pdo, string $ip): void {
+    $tz = new DateTimeZone('Europe/Berlin');
+    $now = new DateTime('now', $tz);
+
+    $stmt = $pdo->prepare("SELECT attempts FROM flohmarkt_login_attempts WHERE ip = ?");
+    $stmt->execute([$ip]);
+    $row = $stmt->fetch();
+    $attempts = $row ? ((int)$row['attempts'] + 1) : 1;
+
+    $locked_until = null;
+    if ($attempts >= 5) {
+        $minutes = min(30, ($attempts - 4) * 2);
+        $lock = clone $now;
+        $lock->modify("+{$minutes} minutes");
+        $locked_until = $lock->format('Y-m-d H:i:s');
+    }
+
+    $stmt = $pdo->prepare("INSERT INTO flohmarkt_login_attempts (ip, attempts, last_attempt, locked_until)
+        VALUES (?, ?, ?, ?)
+        ON DUPLICATE KEY UPDATE attempts = VALUES(attempts), last_attempt = VALUES(last_attempt), locked_until = VALUES(locked_until)");
+    $stmt->execute([$ip, $attempts, $now->format('Y-m-d H:i:s'), $locked_until]);
+}
+
+function flohmarkt_login_register_success(PDO $pdo, string $ip): void {
+    $pdo->prepare("DELETE FROM flohmarkt_login_attempts WHERE ip = ?")->execute([$ip]);
+}
+
+// --- HTML-WHITELIST-FILTER ---
+function flohmarkt_sanitize_html(string $html): string {
+    if (trim($html) === '') return '';
+    $dangerousTags = ['script', 'style', 'iframe', 'object', 'embed', 'form', 'link', 'meta', 'base', 'svg', 'math', 'button', 'input', 'textarea', 'select', 'option', 'audio', 'video', 'source', 'track', 'applet'];
+    $allowedTags = ['a' => ['href', 'title', 'target'], 'b' => [], 'strong' => [], 'i' => [], 'em' => [], 'u' => [], 'br' => [], 'p' => [], 'span' => [], 'div' => [], 'h1' => [], 'h2' => [], 'h3' => [], 'h4' => [], 'ul' => [], 'ol' => [], 'li' => [], 'blockquote' => [], 'small' => []];
+
+    $dom = new DOMDocument();
+    libxml_use_internal_errors(true);
+    $dom->loadHTML('<?xml encoding="utf-8" ?><div id="flohmarkt-root">' . $html . '</div>', LIBXML_NOERROR | LIBXML_NOWARNING);
+    libxml_clear_errors();
+
+    $root = $dom->getElementById('flohmarkt-root');
+    if (!$root) return '';
+
+    flohmarkt_sanitize_walk($root, $allowedTags, $dangerousTags);
+    $out = '';
+    foreach (iterator_to_array($root->childNodes) as $child) {
+        $out .= $dom->saveHTML($child);
+    }
+    return trim($out);
+}
+
+function flohmarkt_sanitize_walk(DOMNode $context, array $allowedTags, array $dangerousTags): void {
+    $toRemove = [];
+    foreach (iterator_to_array($context->childNodes) as $node) {
+        if ($node instanceof DOMComment) { $toRemove[] = $node; continue; }
+        if ($node instanceof DOMText) continue;
+        if (!($node instanceof DOMElement)) { $toRemove[] = $node; continue; }
+
+        $tag = strtolower($node->tagName);
+        if (in_array($tag, $dangerousTags, true)) { $toRemove[] = $node; continue; }
+
+        if (!isset($allowedTags[$tag])) {
+            while ($node->firstChild) { $context->insertBefore($node->firstChild, $node); }
+            $toRemove[] = $node; continue;
+        }
+
+        $allowedAttrs = $allowedTags[$tag];
+        foreach (iterator_to_array($node->attributes) as $attr) {
+            $aname = strtolower($attr->name);
+            if (str_starts_with($aname, 'on') || !in_array($aname, $allowedAttrs, true)) {
+                $node->removeAttribute($attr->name); continue;
+            }
+            if ($aname === 'href') {
+                $val = trim($attr->value);
+                if (!preg_match('/^(https?:|mailto:|\/|#)/i', $val)) { $node->removeAttribute('href'); }
+            }
+        }
+        if ($node->hasAttribute('target')) { $node->setAttribute('rel', 'noopener noreferrer nofollow'); }
+        flohmarkt_sanitize_walk($node, $allowedTags, $dangerousTags);
+    }
+    foreach ($toRemove as $n) { if ($n->parentNode === $context) { $context->removeChild($n); } }
+}
+
+// --- DATENBANK VERBINDUNG & TABELLEN ---
 try {
     $pdo = new PDO("mysql:host=$db_host;dbname=$db_name;charset=utf8", $db_user, $db_pass);
     $pdo->setAttribute(PDO::ATTR_ERRMODE, PDO::ERRMODE_EXCEPTION);
-    
-    // Tabelle für Stände anlegen
+
     $pdo->exec("CREATE TABLE IF NOT EXISTS `flohmarkt_staende` (
         `id` INT AUTO_INCREMENT PRIMARY KEY,
         `name` VARCHAR(100) NOT NULL,
@@ -26,29 +162,19 @@ try {
         `is_approved` TINYINT(1) DEFAULT 0,
         `created_at` TIMESTAMP DEFAULT CURRENT_TIMESTAMP
     ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;");
-    
-    $columnCheck = $pdo->query("SHOW COLUMNS FROM `flohmarkt_staende` LIKE 'delete_token'");
-    if ($columnCheck->rowCount() == 0) {
-        $pdo->exec("ALTER TABLE `flohmarkt_staende` ADD COLUMN `delete_token` VARCHAR(64) NULL AFTER `beschreibung`");
-    }
 
-    // Automatisch sicherstellen, dass jede E-Mail nur einmal vorkommt (wird beim Löschen automatisch freigegeben)
-    try {
-        $stmtCheckIndex = $pdo->query("SHOW INDEXES FROM flohmarkt_staende WHERE Key_name = 'email'");
-        if ($stmtCheckIndex->rowCount() === 0) {
-            $pdo->exec("ALTER TABLE `flohmarkt_staende` ADD UNIQUE (`email`)");
-        }
-    } catch (PDOException $e) {
-        // Falls bereits Duplikate existieren sollten, fängt das Skript es ab
-    }
-
-    // Tabelle für Einstellungen anlegen
     $pdo->exec("CREATE TABLE IF NOT EXISTS `flohmarkt_settings` (
         `s_key` VARCHAR(50) PRIMARY KEY,
         `s_value` TEXT
     ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;");
-    
-    // Standard-Einstellungen definieren
+
+    $pdo->exec("CREATE TABLE IF NOT EXISTS `flohmarkt_login_attempts` (
+        `ip` VARCHAR(45) PRIMARY KEY,
+        `attempts` INT NOT NULL DEFAULT 0,
+        `last_attempt` DATETIME NOT NULL,
+        `locked_until` DATETIME NULL
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;");
+
     $defaults = [
         'title' => 'Dorf-Flohmarkt',
         'date_text' => 'Sonntag, 20. Sept. 2026<br>10:00 - 16:00 Uhr',
@@ -59,19 +185,35 @@ try {
         'map_zoom' => '15',
         'polygon_coords' => '[]',
         'polygon_color' => '#ff0000',
-        'impressum_text' => "<h2>Impressum</h2>\n<p>Max Mustermann<br>Musterstraße 1<br>12345 Musterdorf</p>\n<p>Kontakt: mail@deinedomain.de</p>",
-        'datenschutz_text' => "<h2>Datenschutz</h2>\n<p>Wir speichern Ihre E-Mail nur für den Lösch-Link.</p>",
+        'impressum_text' => "<h2>Impressum</h2>\n<p>Max Mustermann<br>Musterstraße 1<br>12345 Musterdorf</p>",
+        'datenschutz_text' => "<h2>Datenschutz</h2>\n<p>Wir speichern Ihre Daten nur für den Flohmarkt.</p>",
         'registration_active' => '0',
-        'registration_deadline' => '2026-09-18 23:59' 
+        'registration_deadline' => '2026-09-18 23:59'
     ];
 
     $insert = $pdo->prepare("INSERT IGNORE INTO flohmarkt_settings (s_key, s_value) VALUES (?, ?)");
-    foreach ($defaults as $k => $v) { 
-        $insert->execute([$k, $v]); 
-    }
-    
+    foreach ($defaults as $k => $v) { $insert->execute([$k, $v]); }
+
 } catch (PDOException $e) {
-    die("Datenbankverbindung fehlgeschlagen: " . $e->getMessage());
+    error_log('Flohmarkt DB-Fehler: ' . $e->getMessage());
+    http_response_code(500);
+    die('Es ist ein technisches Problem aufgetreten. Bitte versuche es später erneut.');
+}
+
+// --- ADMIN PASSWORT HASH ERMITTELN ---
+// 1. Umgebungsvariable | 2. Datenbank | 3. Fallback auf Default-Passwort "admin123"
+$admin_pass_hash = getenv('FLOHMARKT_ADMIN_HASH');
+if (!$admin_pass_hash && isset($pdo)) {
+    $stmtHash = $pdo->prepare("SELECT s_value FROM flohmarkt_settings WHERE s_key = 'admin_pass_hash'");
+    $stmtHash->execute();
+    $rowHash = $stmtHash->fetch();
+    if ($rowHash && !empty($rowHash['s_value'])) {
+        $admin_pass_hash = $rowHash['s_value'];
+    }
+}
+if (!$admin_pass_hash) {
+    // Hash für Standard-Passwort: admin123
+    $admin_pass_hash = '$2y$10$92IXUNpkjO0rOQ5byMi.Ye4oKoEa3Ro9llC/.og/at2.uheWG/igi';
 }
 
 $settings = [];
@@ -83,19 +225,15 @@ while ($row = $stmt->fetch()) {
 function flohmarkt_registration_status(array $settings): array {
     $tz = new DateTimeZone('Europe/Berlin');
     $now = new DateTime('now', $tz);
-
     $open = isset($settings['registration_active']) && $settings['registration_active'] === '1';
-
     $deadline = null;
     $deadline_error = false;
     $deadline_raw = trim($settings['registration_deadline'] ?? '');
 
-    if ($deadline_raw !== '' && $deadline_raw !== '0000-00-00' && $deadline_raw !== '0000-00-00 00:00:00') {
+    if ($deadline_raw !== '' && $deadline_raw !== '0000-00-00 00:00:00') {
         $normalized = str_replace('T', ' ', $deadline_raw);
         $deadline = DateTime::createFromFormat('Y-m-d H:i:s', $normalized, $tz);
-        if ($deadline === false) {
-            $deadline = DateTime::createFromFormat('Y-m-d H:i', $normalized, $tz);
-        }
+        if ($deadline === false) $deadline = DateTime::createFromFormat('Y-m-d H:i', $normalized, $tz);
 
         if ($deadline === false) {
             $deadline = null;
@@ -104,13 +242,5 @@ function flohmarkt_registration_status(array $settings): array {
             $open = false;
         }
     }
-
-    return [
-        'open' => $open,
-        'deadline' => $deadline,
-        'deadline_raw' => $deadline_raw,
-        'now' => $now,
-        'deadline_error' => $deadline_error,
-    ];
+    return ['open' => $open, 'deadline' => $deadline, 'deadline_raw' => $deadline_raw, 'now' => $now, 'deadline_error' => $deadline_error];
 }
-?>

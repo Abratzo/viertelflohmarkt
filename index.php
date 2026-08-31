@@ -1,10 +1,8 @@
 <?php
 require 'config.php';
 
-// Zwingend deutsche Zeit erzwingen
 date_default_timezone_set('Europe/Berlin');
 
-// Session starten (wichtig für das Captcha)
 if (session_status() === PHP_SESSION_NONE) {
     session_start();
 }
@@ -14,79 +12,82 @@ $msg = '';
 $msgType = 'success';
 $delete_link_show = '';
 
-// --- ANMELDE-STATUS LOGIK PRÜFEN ---
 $status = flohmarkt_registration_status($settings);
 $registration_is_open = $status['open'];
 
-// Weiterleitung zur Karte: Falls jemand direkt ?page=anmelden aufruft, obwohl geschlossen ist.
 if ($page === 'anmelden' && !$registration_is_open) {
     $page = 'map';
     $msg = "Die Anmeldung ist inzwischen leider geschlossen.";
     $msgType = 'error';
 }
 
-// --- LÖSCHEN (über Token) ---
-if ($page === 'delete' && $_GET['token']) {
-    $stmt = $pdo->prepare("DELETE FROM flohmarkt_staende WHERE delete_token = ?");
-    $stmt->execute([$_GET['token']]);
-    if ($stmt->rowCount() > 0) { 
-        $msg = "Dein Stand wurde erfolgreich gelöscht."; 
-    } else { 
-        $msg = "Stand nicht gefunden oder bereits gelöscht."; 
-        $msgType = 'error'; 
+// --- LÖSCHEN (über Token) ----------------------------------------------------
+// PATCH 4: Löschen wird nicht mehr direkt per GET ausgeführt. Es wird eine
+// Bestätigungsseite angezeigt. Erst bei POST wird gelöscht.
+if ($page === 'delete' && isset($_GET['token'])) {
+    if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['confirm_delete'])) {
+        csrf_require();
+        $stmt = $pdo->prepare("DELETE FROM flohmarkt_staende WHERE delete_token = ?");
+        $stmt->execute([$_POST['token']]);
+        if ($stmt->rowCount() > 0) { 
+            $msg = "Dein Stand wurde erfolgreich gelöscht."; 
+        } else { 
+            $msg = "Stand nicht gefunden oder bereits gelöscht."; 
+            $msgType = 'error'; 
+        }
+        $page = 'map';
     }
-    $page = 'map';
 }
 
-// --- ANMELDUNG SPEICHERN ---
+// --- ANMELDUNG SPEICHERN -----------------------------------------------------
 if ($_SERVER['REQUEST_METHOD'] === 'POST' && $page === 'anmelden') {
     if (!$registration_is_open) {
         $msg = "Die Anmeldung ist inzwischen leider geschlossen.";
         $msgType = 'error';
         $page = 'map';
     } else {
+        // PATCH 3: CSRF-Schutz beim Anmelden prüfen
+        csrf_require();
+
+        // PATCH 5: Honeypot-Feld prüfen. Bots füllen dieses unsichtbare Feld in 
+        // der Regel aus. Wenn es nicht leer ist, brechen wir ab.
+        if (!empty($_POST['honeypot'])) {
+            die('Spam erkannt.');
+        }
+
         $name = trim($_POST['name'] ?? ''); 
         $email = trim($_POST['email'] ?? ''); 
         $adresse = trim($_POST['adresse'] ?? '');
-        $lat = $_POST['lat'] ?? ''; 
-        $lng = $_POST['lng'] ?? ''; 
+        
+        // PATCH 1: Koordinaten strikt als Fließkommazahlen speichern
+        $lat = (float)($_POST['lat'] ?? 0); 
+        $lng = (float)($_POST['lng'] ?? 0); 
         $beschreibung = trim($_POST['beschreibung'] ?? '');
         
-        // Eingaben für Captcha & Validierung
-        $user_captcha = trim($_POST['captcha'] ?? '');
-        $session_captcha = $_SESSION['captcha_result'] ?? 999;
-
-        // 1. Captcha prüfen
-        if (empty($user_captcha) || intval($user_captcha) !== intval($session_captcha)) {
-            $msg = "Das Rechenergebnis des Captchas ist falsch. Bitte versuche es erneut.";
-            $msgType = 'error';
-        }
-        // 2. Datenschutz prüfen
-        elseif (!isset($_POST['datenschutz'])) { 
+        if (!isset($_POST['datenschutz'])) { 
             $msg = "Bitte stimme den Datenschutzbedingungen zu."; 
             $msgType = 'error'; 
         } 
-        // 3. E-Mail-Adresse auf korrekte Syntax überprüfen
         elseif (!filter_var($email, FILTER_VALIDATE_EMAIL)) {
             $msg = "Die angegebene E-Mail-Adresse ist ungültig.";
             $msgType = 'error';
         } 
-        elseif (!empty($name) && !empty($email) && !empty($adresse) && !empty($lat)) {
+        elseif (!empty($name) && !empty($email) && !empty($adresse) && $lat !== 0.0) {
             
-            // 4. Prüfen, ob die E-Mail-Adresse bereits registriert wurde
             $stmt_check = $pdo->prepare("SELECT COUNT(*) FROM flohmarkt_staende WHERE email = ?");
             $stmt_check->execute([$email]);
             if ($stmt_check->fetchColumn() > 0) {
                 $msg = "Diese E-Mail-Adresse wurde bereits für einen Stand verwendet. Jede E-Mail ist nur einmal erlaubt.";
                 $msgType = 'error';
             } else {
-                // Alles fein -> Speichern
                 $delete_token = bin2hex(random_bytes(16));
                 $pdo->prepare("INSERT INTO flohmarkt_staende (name, email, adresse, lat, lng, beschreibung, delete_token) VALUES (?, ?, ?, ?, ?, ?, ?)")
                     ->execute([$name, $email, $adresse, $lat, $lng, $beschreibung, $delete_token]);
                 
-                $delete_link = "https://" . $_SERVER['HTTP_HOST'] . strtok($_SERVER['REQUEST_URI'], '?') . "?page=delete&token=" . $delete_token;
-                @mail($email, "Deine Flohmarkt-Anmeldung", "Hallo $name,\ndein Stand wurde angemeldet.\nLöschen-Link: $delete_link", "From: noreply@" . $_SERVER['HTTP_HOST']);
+                // PATCH 2: Die Variable $app_domain aus config.php nutzen statt 
+                // $_SERVER['HTTP_HOST'] (Schutz vor Host Header Injection)
+                $delete_link = "https://" . $app_domain . strtok($_SERVER['REQUEST_URI'], '?') . "?page=delete&token=" . $delete_token;
+                @mail($email, "Deine Flohmarkt-Anmeldung", "Hallo $name,\ndein Stand wurde angemeldet.\nLöschen-Link: $delete_link", "From: noreply@" . $app_domain);
 
                 $msg = "Dein Stand wurde angemeldet und wird nach Prüfung sichtbar.";
                 $delete_link_show = "Lösch-Link (wurde auch per E-Mail gesendet): <br><a href='$delete_link'>$delete_link</a>";
@@ -98,12 +99,6 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && $page === 'anmelden') {
         }
     }
 }
-
-// Neues Captcha für den Aufruf generieren
-$num1 = rand(1, 9);
-$num2 = rand(1, 9);
-$_SESSION['captcha_result'] = $num1 + $num2;
-$captcha_question = "$num1 + $num2";
 ?>
 <!DOCTYPE html>
 <html lang="de">
@@ -114,100 +109,17 @@ $captcha_question = "$num1 + $num2";
     <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
     <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
     <style>
-        body, html { 
-            margin: 0; 
-            padding: 0; 
-            font-family: sans-serif; 
-            background: #f4f4f4;
-            height: 100dvh; 
-            display: flex;
-            flex-direction: column;
-            overflow-y: auto;
-        }
-        
-        .navbar { 
-            display: flex; 
-            background: #0056b3; 
-            color: white; 
-            flex-wrap: wrap; 
-            flex-shrink: 0; 
-        }
-        .navbar a { 
-            flex: 1; 
-            text-align: center; 
-            color: white; 
-            text-decoration: none; 
-            font-weight: bold; 
-            padding: 15px 5px; 
-            min-width: 30%; 
-        }
+        body, html { margin: 0; padding: 0; font-family: sans-serif; background: #f4f4f4; height: 100dvh; display: flex; flex-direction: column; overflow-y: auto; }
+        .navbar { display: flex; background: #0056b3; color: white; flex-wrap: wrap; flex-shrink: 0; }
+        .navbar a { flex: 1; text-align: center; color: white; text-decoration: none; font-weight: bold; padding: 15px 5px; min-width: 30%; }
         .navbar a.active { background: #004494; }
-        
-        .container { 
-            padding: 20px; 
-            max-width: 600px; 
-            margin: 0 auto; 
-            width: 100%;
-            box-sizing: border-box;
-        }
-        
-        .map-container { 
-            position: relative; 
-            flex-grow: 1; 
-            width: 100%; 
-            overflow: hidden; 
-        }
+        .container { padding: 20px; max-width: 600px; margin: 0 auto; width: 100%; box-sizing: border-box; }
+        .map-container { position: relative; flex-grow: 1; width: 100%; overflow: hidden; }
         #map { height: 100%; width: 100%; z-index: 1; }
-        
-        .map-info-box { 
-            position: absolute; 
-            bottom: 25px; 
-            left: 50%; 
-            transform: translateX(-50%); 
-            background: rgba(255, 255, 255, 0.95); 
-            padding: 12px 20px; 
-            border-radius: 20px; 
-            box-shadow: 0 4px 15px rgba(0,0,0,0.2); 
-            text-align: center; 
-            z-index: 1000; 
-            font-size: 0.9em; 
-            color: #333; 
-            width: 85%; 
-            max-width: 350px; 
-            border: 2px solid #0056b3;
-            transition: all 0.3s ease;
-        }
-        .map-info-box.minimized {
-            width: auto;
-            padding: 8px 15px;
-            bottom: 10px;
-        }
+        .map-info-box { position: absolute; bottom: 25px; left: 50%; transform: translateX(-50%); background: rgba(255, 255, 255, 0.95); padding: 12px 20px; border-radius: 20px; box-shadow: 0 4px 15px rgba(0,0,0,0.2); text-align: center; z-index: 1000; font-size: 0.9em; color: #333; width: 85%; max-width: 350px; border: 2px solid #0056b3; transition: all 0.3s ease; }
+        .map-info-box.minimized { width: auto; padding: 8px 15px; bottom: 10px; }
         .map-info-box.minimized .info-content { display: none; }
-        .toggle-info-btn {
-            background: none;
-            border: none;
-            color: #0056b3;
-            font-size: 0.8em;
-            cursor: pointer;
-            font-weight: bold;
-            margin-top: 5px;
-            padding: 0;
-            text-decoration: underline;
-        }
-
-        .app-attribution {
-            position: absolute;
-            bottom: 5px;
-            left: 5px;
-            background: rgba(255, 255, 255, 0.8);
-            padding: 2px 6px;
-            font-size: 11px;
-            z-index: 1000;
-            border-radius: 3px;
-            text-decoration: none;
-            color: #0078A8;
-        }
-
+        .toggle-info-btn { background: none; border: none; color: #0056b3; font-size: 0.8em; cursor: pointer; font-weight: bold; margin-top: 5px; padding: 0; text-decoration: underline; }
         .alert { padding: 15px; margin-bottom: 20px; border-radius: 4px; text-align: center; }
         .alert.success { background: #d4edda; color: #155724; border: 1px solid #c3e6cb; }
         .alert.error { background: #f8d7da; color: #721c24; }
@@ -240,22 +152,21 @@ $captcha_question = "$num1 + $num2";
         <div class="map-info-box" id="infoBox">
             🎈 <b><?= htmlspecialchars($settings['title']) ?></b>
             <div class="info-content" style="margin-top: 4px;">
-                <?= $settings['date_text'] ?>
+                <?= flohmarkt_sanitize_html($settings['date_text'] ?? '') ?>
             </div>
             <button type="button" class="toggle-info-btn" id="toggleInfoBtn" onclick="toggleInfoBox()">Info ausblenden</button>
         </div>
         <div id="map"></div>
-        <a href="https://github.com/Abratzo/viertelflohmarkt/" target="_blank" class="app-attribution">ViertelFlohmarkt App</a>
     </div>
     
     <script>
-        var map = L.map('map').setView([<?= $settings['map_lat'] ?>, <?= $settings['map_lng'] ?>], <?= $settings['map_zoom'] ?>);
+        var map = L.map('map').setView([<?= json_encode((float)($settings['map_lat'] ?? 49.745472)) ?>, <?= json_encode((float)($settings['map_lng'] ?? 8.483472)) ?>], <?= json_encode((int)($settings['map_zoom'] ?? 15)) ?>);
         L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', { maxZoom: 19, attribution: '© OpenStreetMap' }).addTo(map);
 
-        var polyCoords = <?= $settings['polygon_coords'] ?: '[]' ?>;
+        var polyCoords = <?= json_encode(json_decode($settings['polygon_coords'] ?? '[]', true) ?: []) ?>;
         if(polyCoords.length > 2) {
             L.polygon(polyCoords, {
-                color: '<?= $settings['polygon_color'] ?>',
+                color: <?= json_encode($settings['polygon_color'] ?? '#ff0000') ?>,
                 fillOpacity: 0.1,
                 weight: 3
             }).addTo(map);
@@ -265,7 +176,8 @@ $captcha_question = "$num1 + $num2";
         $stmt = $pdo->query("SELECT * FROM flohmarkt_staende WHERE is_approved = 1");
         while ($sys_row = $stmt->fetch()) {
             $popupContent = nl2br(htmlspecialchars($sys_row['beschreibung']));
-            echo "var marker = L.marker([" . $sys_row['lat'] . ", " . $sys_row['lng'] . "]).addTo(map);";
+            // PATCH 1: Explizites Casten zu Float beim Ausgeben in JS (verhindert XSS)
+            echo "var marker = L.marker([" . (float)$sys_row['lat'] . ", " . (float)$sys_row['lng'] . "]).addTo(map);";
             echo "marker.bindPopup(" . json_encode($popupContent) . ");";
         }
         ?>
@@ -294,6 +206,12 @@ $captcha_question = "$num1 + $num2";
         <?php endif; ?>
 
         <form method="POST" action="?page=anmelden" id="anmeldeForm">
+            <!-- PATCH 3: CSRF Token integriert -->
+            <?= csrf_field() ?>
+
+            <!-- PATCH 5: Honeypot statt Captcha -->
+            <input type="text" name="honeypot" value="" style="display:none;" tabindex="-1" autocomplete="off">
+
             <div class="form-group"><label>Dein Name (nicht öffentlich):</label><input type="text" name="name" required></div>
             <div class="form-group"><label>E-Mail Adresse (wird auf Einmaligkeit geprüft):</label><input type="email" name="email" required></div>
             
@@ -311,12 +229,6 @@ $captcha_question = "$num1 + $num2";
             
             <div class="form-group"><label>Was bietest du an?</label><textarea name="beschreibung" rows="5" required></textarea></div>
             
-            <!-- Captcha Feld -->
-            <div class="form-group" style="background: #eef5fb; padding: 12px; border-radius: 4px; border: 1px solid #bce8f1;">
-                <label style="color: #31708f;">Spamschutz: Was ist <?= $captcha_question ?>?</label>
-                <input type="text" name="captcha" placeholder="Ergebnis eingeben" required style="margin-top: 5px;">
-            </div>
-
             <div style="display: flex; margin-top: 15px;">
                 <input type="checkbox" name="datenschutz" id="dsgvo" required style="margin-right:10px; margin-top:4px;">
                 <label for="dsgvo" style="font-weight: normal; font-size: 0.9em;">
@@ -373,11 +285,27 @@ $captcha_question = "$num1 + $num2";
         });
     </script>
 
+<?php elseif ($page === 'delete' && isset($_GET['token'])): ?>
+    <!-- PATCH 4: Bestätigungsformular für das Löschen (statt sofortigem Löschen via GET) -->
+    <div class="container">
+        <h2>Stand löschen</h2>
+        <div class="alert" style="background:#fff3cd; border:1px solid #ffeeba; color:#856404; text-align:left;">
+            <p>Möchtest du deinen Stand wirklich endgültig löschen?</p>
+            <form method="POST">
+                <?= csrf_field() ?>
+                <input type="hidden" name="token" value="<?= htmlspecialchars($_GET['token']) ?>">
+                <input type="hidden" name="confirm_delete" value="1">
+                <button type="submit" class="btn-primary" style="background:#dc3545; border-color:#dc3545;">Ja, Stand löschen</button>
+            </form>
+            <a href="?page=map" style="display:block; text-align:center; margin-top:15px; color:#666; text-decoration:none;">Abbrechen und zurück zur Karte</a>
+        </div>
+    </div>
+
 <?php elseif ($page === 'impressum'): ?>
     <div class="container">
-        <?= $settings['impressum_text'] ?>
+        <?= flohmarkt_sanitize_html($settings['impressum_text'] ?? '') ?>
         <hr>
-        <?= $settings['datenschutz_text'] ?>
+        <?= flohmarkt_sanitize_html($settings['datenschutz_text'] ?? '') ?>
     </div>
 <?php endif; ?>
 
