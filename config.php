@@ -7,15 +7,25 @@ if (basename($_SERVER['SCRIPT_FILENAME'] ?? '') === basename(__FILE__)) {
 }
 
 if (session_status() === PHP_SESSION_NONE) {
+    $is_https = (!empty($_SERVER['HTTPS']) && $_SERVER['HTTPS'] !== 'off')
+        || (($_SERVER['SERVER_PORT'] ?? '') == 443);
+    session_set_cookie_params([
+        'lifetime' => 0,
+        'path' => '/',
+        'domain' => '',
+        'secure' => $is_https,   // Cookie nur über HTTPS senden (sofern per HTTPS aufgerufen)
+        'httponly' => true,      // Kein Zugriff per JavaScript (schützt Session-ID vor XSS)
+        'samesite' => 'Lax',     // Grundschutz gegen CSRF-getriggerte Cross-Site-Requests
+    ]);
     session_start();
 }
 
-$app_domain = 'www.DEINE-DOMAIN.de'; 
+$app_domain = 'DOMAIN'; 
 
 $db_host = 'localhost';
-$db_name = 'DB_NAME';        // Dein DB-Name
-$db_user = 'DB-NUTZER';        // Dein DB-Nutzer
-$db_pass = 'DB-PASS';   // <-- Hier dein DB-Passwort 
+$db_name = 'DB-Name';        // Dein DB-Name
+$db_user = 'DB-Nutzer';      // Dein DB-Nutzer
+$db_pass = 'DB-PASSWORT';    // <-- Hier dein DB-Passwort
 
 // --- CSRF-SCHUTZ ---
 if (empty($_SESSION['csrf_token'])) {
@@ -43,7 +53,7 @@ function csrf_require(): void {
     }
 }
 
-// --- LOGIN-SCHUTZ (Rate-Limiting) ---
+// --- RATE-LIMITING (Login & Registrierung) ---
 function flohmarkt_client_ip(): string {
     return $_SERVER['REMOTE_ADDR'] ?? '0.0.0.0';
 }
@@ -91,7 +101,80 @@ function flohmarkt_login_register_success(PDO $pdo, string $ip): void {
     $pdo->prepare("DELETE FROM flohmarkt_login_attempts WHERE ip = ?")->execute([$ip]);
 }
 
-// --- HTML-WHITELIST-FILTER ---
+// --- RATE-LIMITING FÜR DIE STAND-ANMELDUNG (Captcha-Schutz) ---
+function flohmarkt_reg_is_locked(PDO $pdo, string $ip): ?DateTime {
+    $stmt = $pdo->prepare("SELECT locked_until FROM flohmarkt_reg_attempts WHERE ip = ?");
+    $stmt->execute([$ip]);
+    $row = $stmt->fetch();
+    if ($row && !empty($row['locked_until'])) {
+        $tz = new DateTimeZone('Europe/Berlin');
+        $locked = DateTime::createFromFormat('Y-m-d H:i:s', $row['locked_until'], $tz);
+        $now = new DateTime('now', $tz);
+        if ($locked && $now < $locked) {
+            return $locked;
+        }
+    }
+    return null;
+}
+
+function flohmarkt_reg_register_failure(PDO $pdo, string $ip): void {
+    $tz = new DateTimeZone('Europe/Berlin');
+    $now = new DateTime('now', $tz);
+    $stmt = $pdo->prepare("SELECT attempts FROM flohmarkt_reg_attempts WHERE ip = ?");
+    $stmt->execute([$ip]);
+    $row = $stmt->fetch();
+    $attempts = $row ? ((int)$row['attempts'] + 1) : 1;
+
+    $locked_until = null;
+    if ($attempts >= 3) {
+        $minutes = 15; // 15 Minuten Sperre nach 3 Fehlversuchen
+        $lock = clone $now;
+        $lock->modify("+{$minutes} minutes");
+        $locked_until = $lock->format('Y-m-d H:i:s');
+    }
+    $stmt = $pdo->prepare("INSERT INTO flohmarkt_reg_attempts (ip, attempts, last_attempt, locked_until)
+        VALUES (?, ?, ?, ?)
+        ON DUPLICATE KEY UPDATE attempts = VALUES(attempts), last_attempt = VALUES(last_attempt), locked_until = VALUES(locked_until)");
+    $stmt->execute([$ip, $attempts, $now->format('Y-m-d H:i:s'), $locked_until]);
+}
+
+function flohmarkt_reg_register_success(PDO $pdo, string $ip): void {
+    $pdo->prepare("DELETE FROM flohmarkt_reg_attempts WHERE ip = ?")->execute([$ip]);
+}
+
+// --- EINFACHES, SELBST GEHOSTETES CAPTCHA (Rechenaufgabe) ---
+// Kein externer Dienst (kein Google/hCaptcha) nötig, funktioniert daher ohne
+// API-Keys und ohne Daten an Dritte zu senden. Kombiniert mit Honeypot und
+// IP-Rate-Limiting reicht das für den erwarteten Bot-Traffic einer kleinen
+// Dorf-Veranstaltung locker aus.
+function flohmarkt_captcha_new(): array {
+    $a = random_int(1, 9);
+    $b = random_int(1, 9);
+    $_SESSION['captcha_answer'] = $a + $b;
+    return ['a' => $a, 'b' => $b];
+}
+
+function flohmarkt_captcha_verify(?string $answer): bool {
+    $expected = $_SESSION['captcha_answer'] ?? null;
+    unset($_SESSION['captcha_answer']); // Einmal-Verwendung, verhindert Replay
+    if ($expected === null || $answer === null || trim($answer) === '') return false;
+    return (int)trim($answer) === (int)$expected;
+}
+
+// --- UTF-8-SICHERER MAILVERSAND ---
+// PHP's mail() setzt ohne explizite Header kein UTF-8, wodurch Umlaute
+// (ö, ä, ü, ß) im Betreff und Text kaputt gehen. Betreff wird MIME-kodiert,
+// Body bekommt einen expliziten Content-Type-Header.
+function flohmarkt_send_mail(string $to, string $subject, string $body, string $fromDomain): bool {
+    $encoded_subject = '=?UTF-8?B?' . base64_encode($subject) . '?=';
+    $headers = "From: noreply@" . $fromDomain . "\r\n"
+        . "MIME-Version: 1.0\r\n"
+        . "Content-Type: text/plain; charset=UTF-8\r\n"
+        . "Content-Transfer-Encoding: 8bit";
+    return @mail($to, $encoded_subject, $body, $headers);
+}
+
+// --- HTML-WHITELIST-FILTER (für WYSIWYG Editor) ---
 function flohmarkt_sanitize_html(string $html): string {
     if (trim($html) === '') return '';
     $dangerousTags = ['script', 'style', 'iframe', 'object', 'embed', 'form', 'link', 'meta', 'base', 'svg', 'math', 'button', 'input', 'textarea', 'select', 'option', 'audio', 'video', 'source', 'track', 'applet'];
@@ -145,9 +228,37 @@ function flohmarkt_sanitize_walk(DOMNode $context, array $allowedTags, array $da
     foreach ($toRemove as $n) { if ($n->parentNode === $context) { $context->removeChild($n); } }
 }
 
+// --- SERVERSEITIGE GEBIETSPRÜFUNG (Punkt-in-Polygon) ---
+function flohmarkt_point_in_polygon(float $lat, float $lng, array $polygon): bool {
+    $n = count($polygon);
+    if ($n < 3) return false; 
+
+    $inside = false;
+    $j = $n - 1;
+    for ($i = 0; $i < $n; $i++) {
+        $latI = (float)($polygon[$i][0] ?? NAN);
+        $lngI = (float)($polygon[$i][1] ?? NAN);
+        $latJ = (float)($polygon[$j][0] ?? NAN);
+        $lngJ = (float)($polygon[$j][1] ?? NAN);
+
+        $intersects = (($lngI > $lng) !== ($lngJ > $lng))
+            && ($lat < ($latJ - $latI) * ($lng - $lngI) / ($lngJ - $lngI) + $latI);
+        if ($intersects) { $inside = !$inside; }
+        $j = $i;
+    }
+    return $inside;
+}
+
+function flohmarkt_address_allowed(float $lat, float $lng, array $settings): bool {
+    if ($lat < -90 || $lat > 90 || $lng < -180 || $lng > 180) return false;
+    $polygon = json_decode($settings['polygon_coords'] ?? '[]', true);
+    if (!is_array($polygon) || count($polygon) < 3) return true;
+    return flohmarkt_point_in_polygon($lat, $lng, $polygon);
+}
+
 // --- DATENBANK VERBINDUNG & TABELLEN ---
 try {
-    $pdo = new PDO("mysql:host=$db_host;dbname=$db_name;charset=utf8", $db_user, $db_pass);
+    $pdo = new PDO("mysql:host=$db_host;dbname=$db_name;charset=utf8mb4", $db_user, $db_pass);
     $pdo->setAttribute(PDO::ATTR_ERRMODE, PDO::ERRMODE_EXCEPTION);
 
     $pdo->exec("CREATE TABLE IF NOT EXISTS `flohmarkt_staende` (
@@ -174,6 +285,32 @@ try {
         `last_attempt` DATETIME NOT NULL,
         `locked_until` DATETIME NULL
     ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;");
+    
+    $pdo->exec("CREATE TABLE IF NOT EXISTS `flohmarkt_reg_attempts` (
+        `ip` VARCHAR(45) PRIMARY KEY,
+        `attempts` INT NOT NULL DEFAULT 0,
+        `last_attempt` DATETIME NOT NULL,
+        `locked_until` DATETIME NULL
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;");
+
+    $pdo->exec("CREATE TABLE IF NOT EXISTS `flohmarkt_infopoints` (
+        `id` INT AUTO_INCREMENT PRIMARY KEY,
+        `type` VARCHAR(50) NOT NULL,
+        `title` VARCHAR(150) NOT NULL,
+        `beschreibung` TEXT NULL,
+        `icon` VARCHAR(8) NULL,
+        `lat` DECIMAL(10, 8) NOT NULL,
+        `lng` DECIMAL(11, 8) NOT NULL,
+        `created_at` TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;");
+
+    // Migration für bereits bestehende Installationen ohne `icon`-Spalte
+    // (CREATE TABLE IF NOT EXISTS legt sie bei einer schon vorhandenen
+    // Tabelle nicht nachträglich an).
+    $col = $pdo->query("SHOW COLUMNS FROM `flohmarkt_infopoints` LIKE 'icon'")->fetch();
+    if (!$col) {
+        $pdo->exec("ALTER TABLE `flohmarkt_infopoints` ADD COLUMN `icon` VARCHAR(8) NULL AFTER `beschreibung`");
+    }
 
     $defaults = [
         'title' => 'Dorf-Flohmarkt',
@@ -201,7 +338,6 @@ try {
 }
 
 // --- ADMIN PASSWORT HASH ERMITTELN ---
-// 1. Umgebungsvariable | 2. Datenbank | 3. Fallback auf Default-Passwort "admin123"
 $admin_pass_hash = getenv('FLOHMARKT_ADMIN_HASH');
 if (!$admin_pass_hash && isset($pdo)) {
     $stmtHash = $pdo->prepare("SELECT s_value FROM flohmarkt_settings WHERE s_key = 'admin_pass_hash'");
@@ -212,8 +348,7 @@ if (!$admin_pass_hash && isset($pdo)) {
     }
 }
 if (!$admin_pass_hash) {
-    // Hash für Standard-Passwort: admin123
-    $admin_pass_hash = '$2y$10$92IXUNpkjO0rOQ5byMi.Ye4oKoEa3Ro9llC/.og/at2.uheWG/igi';
+    $admin_pass_hash = '$2y$10$92IXUNpkjO0rOQ5byMi.Ye4oKoEa3Ro9llC/.og/at2.uheWG/igi'; // admin123
 }
 
 $settings = [];

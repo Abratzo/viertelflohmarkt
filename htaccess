@@ -1,0 +1,17 @@
+# Zusätzliche Absicherung von config.php auf Apache-Ebene (Verteidigung in
+# der Tiefe – der PHP-Code selbst blockiert direkten Aufruf auch schon).
+# Diese Datei in denselben Ordner wie index.php/admin.php/config.php legen.
+<IfModule mod_authz_core.c>
+    <Files "config.php">
+        Require all denied
+    </Files>
+</IfModule>
+<IfModule !mod_authz_core.c>
+    <Files "config.php">
+        Order allow,deny
+        Deny from all
+    </Files>
+</IfModule>
+
+# Keine Verzeichnisauflistung
+Options -Indexes
