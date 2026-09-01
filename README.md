@@ -10,16 +10,25 @@ Eine webbasierte Open-Source-Plattform für lokale Viertel- und Garagenflohmärk
 
 ## 🚀 Funktionen
 
-* **Interaktive Karte:** Zeigt alle freigeschalteten Flohmarktstände auf einer OpenStreetMap-Karte inklusive Beschreibung und Adresse an.
-* **Stand-Anmeldung:** Komfortable Online-Anmeldung für Teilnehmer mit automatischer Adressvalidierung (Nominatim/OpenStreetMap).
-* **Automatischer Anmeldeschluss:** Zeitgesteuerte oder manuelle Deaktivierung der Anmeldung.
-* **Admin-Bereich (CMS):** Freigabe, Deaktivierung und Löschung von Ständen, Anpassung von Texten (Impressum, Datenschutz) sowie Definition des erlaubten PLZ-Gebiets und eines farbigen Begrenzungs-Polygons.
-* **Erweiterte Sicherheit & Datenschutz:**
-  * **Honeypot-Spamschutz:** Effektive Bot-Abwehr bei der Stand-Anmeldung ohne nervige Captchas.
-  * **CSRF- & Rate-Limiting-Schutz:** Schutz vor automatisierten Angriffsversuchen und IP-Sperre bei mehrfachen Falscheingaben im Admin-Login.
-  * **Geführter Ersteinrichtungs-Zwang:** Erfordert beim ersten Einloggen zwingend die Vergabe eines neuen Admin-Passworts.
-  * **Datenschutz:** DSGVO-konforme Formularabfragen und token-basierte Stand-Löschung durch die Teilnehmer selbst.
+### Für Besucher & Teilnehmer
+* Interaktive Karte: Übersicht aller freigeschalteten Flohmarktstände auf OpenStreetMap-Basis inkl. Angeboten und Beschreibungen.  
+* Intelligente Marker-Verteilung: Automatische Spiralanordnung bei Mehrfach-Anmeldungen unter derselben Adresse zur besseren Lesbarkeit.  
+* Info-Points & Wegweiser: Visuelle Hervorhebung von WCs, Essens-/Getränkeständen, Info-Points oder Straßensperrungen – auch mit eigenen Emojis.  
+* Komfortable Anmeldung: Online-Formular mit automatischer Adressvalidierung (Nominatim/OpenStreetMap) und WYSIWYG-Texteditor.  
+* Selbstverwaltung: Automatisch generierter Lösch-Link per E-Mail für Teilnehmer.
+   
+### Für Administrator:innen (CMS)
+* Verwaltung & Freigabe: Stände per Klick freischalten, deaktivieren, bearbeiten oder manuell für analoge/offline Anmeldungen anlegen.  
+* Gebietsbegrenzung: Grafisches Einzeichnen des Flohmarkt-Gebiets auf der Karte (Geofencing mit serverseitiger Validierung).  
+* Zeitsteuerung: Automatischer Anmeldeschluss nach Datum/Uhrzeit sowie automatisierte Löschung der Teilnehmerdaten nach dem Flohmarkt.  
+* E-Mail-Benachrichtigungen: E-Mail-Updates bei Neuanmeldungen (sofort oder als tägliche Zusammenfassung) und Erinnerungen bei Ablauf der Anmeldefrist.  
+* Anpassbares Design: Individuelle Farbwahl für Themes und Begrenzungslinien direkt über das Backend. 
 
+### Sicherheit & Datenschutz (DSGVO)
+* Integrierter Bot-Schutz: Kombinierter Spamschutz aus Honeypot, selbst gehosteter Rechenaufgabe (ohne externe Dienste wie Google reCAPTCHA) und IP-Rate-Limiting.  
+* Maximale Sicherheit: CSRF-Schutz auf allen Formularen, Session-Sicherheit, HTML-Purifier für Editoren und IP-Sperre bei zu vielen Admin-Login-Versuchen.  
+* Ersteinrichtungs-Zwang: Automatische Aufforderung zur Änderung des Standard-Passworts beim ersten Start.  
+* Datensparsamkeit: Auf der öffentlichen Karte werden zum Schutz der Privatsphäre nur die Angebote (keine Namen oder E-Mails) angezeigt. 
 ---
 
 ## 📦 Anleitung zum einfachen Selbst-Hosting
@@ -40,10 +49,12 @@ Die Anwendung benötigt einen einfachen Webserver mit **PHP** und einer **MySQL-
 2. **Konfiguration anpassen (`config.php`):**
    Öffne die Datei `config.php` und trage deine Domain sowie deine Datenbank-Zugangsdaten ein:
    ```php
-   $app_domain = 'www.dein-flohmarkt.de'; // Deine Domain (ohne https://)
+   $app_domain = 'dein-flohmarkt.de'; // Seine Domain (ohne https://)
 
-   $db_host = 'localhost';$db_name = 'dein_datenbank_name';
-   $db_user = 'dein_datenbank_benutzer';$db_pass = 'dein_datenbank_passwort';
+   $db_host = 'localhost';             // Datenbank-Server
+   $db_name = 'dein_datenbank_name';   // Name der Datenbank
+   $db_user = 'dein_datenbank_nutzer'; // Datenbank-Benutzername
+   $db_pass = 'dein_passwort';         // Datenbank-Passwort[cite: 1]
 
 3. **Tabellen automatisch erstellen lassen:**
 Beim ersten Aufruf der Website oder des Admin-Bereichs werden alle benötigten Datenbanktabellen automatisch angelegt.
