@@ -174,6 +174,92 @@ function flohmarkt_send_mail(string $to, string $subject, string $body, string $
     return @mail($to, $encoded_subject, $body, $headers);
 }
 
+// --- EINSTELLUNG SPEICHERN (kleiner Helfer für Scheduler & Admin) ---
+function flohmarkt_set_setting(PDO $pdo, string $key, string $value): void {
+    $stmt = $pdo->prepare("INSERT INTO flohmarkt_settings (s_key, s_value) VALUES (?, ?) ON DUPLICATE KEY UPDATE s_value = VALUES(s_value)");
+    $stmt->execute([$key, $value]);
+}
+
+// --- ADMIN-BENACHRICHTIGUNGEN & AUTOMATISCHES LÖSCHEN (Scheduler) ---
+// Da auf einfachem Webhosting oft kein zuverlässiger Cronjob läuft, wird
+// diese Funktion opportunistisch bei JEDEM Seitenaufruf (index.php UND
+// admin.php) ausgeführt. Sie ist bewusst günstig gehalten (wenige Selects,
+// nur bei Bedarf ein Mailversand) und schadet daher nicht bei häufigem
+// Aufruf. Für exaktes Timing kann optional cron.php per echtem Cronjob
+// aufgerufen werden - dieselbe Funktion wird dann einfach zusätzlich/eher
+// ausgelöst.
+function flohmarkt_run_scheduled_tasks(PDO $pdo, array $settings, string $app_domain): void {
+    $tz = new DateTimeZone('Europe/Berlin');
+    $now = new DateTime('now', $tz);
+    $notify_email = trim($settings['admin_notify_email'] ?? '');
+    $notify_mode = $settings['admin_notify_mode'] ?? 'off';
+
+    // 1. Tägliche/mehrtägige Sammel-Benachrichtigung über Neuanmeldungen
+    if ($notify_mode === 'daily' && $notify_email !== '') {
+        $interval_days = max(1, min(7, (int)($settings['admin_notify_interval_days'] ?? 1)));
+        $last_sent_raw = trim($settings['admin_notify_last_sent'] ?? '');
+        $due = true;
+        if ($last_sent_raw !== '') {
+            $last_sent = DateTime::createFromFormat('Y-m-d H:i:s', $last_sent_raw, $tz);
+            if ($last_sent) {
+                $next_due = clone $last_sent;
+                $next_due->modify("+{$interval_days} days");
+                $due = ($now >= $next_due);
+            }
+        }
+        if ($due) {
+            $stmt = $pdo->prepare("SELECT COUNT(*) FROM flohmarkt_staende WHERE created_at > ?");
+            $stmt->execute([$last_sent_raw !== '' ? $last_sent_raw : '1970-01-01 00:00:00']);
+            $count = (int)$stmt->fetchColumn();
+            if ($count > 0) {
+                $body = "Hallo,\n\nseit der letzten Zusammenfassung haben sich $count neue Standbetreiber:innen für \""
+                    . ($settings['title'] ?? 'den Flohmarkt') . "\" angemeldet und warten ggf. auf Freischaltung.\n\n"
+                    . "Bitte im Admin-Bereich prüfen: https://" . $app_domain . "/admin.php?tab=staende";
+                flohmarkt_send_mail($notify_email, "Flohmarkt: $count neue Anmeldung(en)", $body, $app_domain);
+            }
+            flohmarkt_set_setting($pdo, 'admin_notify_last_sent', $now->format('Y-m-d H:i:s'));
+        }
+    }
+
+    // 2. Erinnerung, sobald die Anmeldefrist abgelaufen ist (einmalig pro Frist)
+    if ($notify_mode !== 'off' && $notify_email !== '') {
+        $deadline_raw = trim($settings['registration_deadline'] ?? '');
+        if ($deadline_raw !== '' && $deadline_raw !== '0000-00-00 00:00:00') {
+            $normalized = str_replace('T', ' ', $deadline_raw);
+            $deadline = DateTime::createFromFormat('Y-m-d H:i:s', $normalized, $tz) ?: DateTime::createFromFormat('Y-m-d H:i', $normalized, $tz);
+            $already_sent_for = $settings['admin_notify_deadline_sent_for'] ?? '';
+            if ($deadline && $now >= $deadline && $already_sent_for !== $deadline_raw) {
+                $body = "Hallo,\n\ndie Anmeldephase für \"" . ($settings['title'] ?? 'den Flohmarkt') . "\" ist soeben abgelaufen "
+                    . "(Stichtag: " . $deadline->format('d.m.Y H:i') . " Uhr).\n\n"
+                    . "Bitte prüfe im Admin-Bereich, ob noch Anmeldungen zur Freischaltung warten: https://" . $app_domain . "/admin.php?tab=staende";
+                flohmarkt_send_mail($notify_email, "Flohmarkt: Anmeldephase abgelaufen", $body, $app_domain);
+                flohmarkt_set_setting($pdo, 'admin_notify_deadline_sent_for', $deadline_raw);
+            }
+        }
+    }
+
+    // 3. Automatisches Löschen der Teilnehmerdaten nach Ablauf des Flohmarkts
+    if (($settings['auto_delete_enabled'] ?? '0') === '1') {
+        $delete_raw = trim($settings['auto_delete_date'] ?? '');
+        $already_done_for = $settings['auto_delete_executed_for'] ?? '';
+        if ($delete_raw !== '' && $delete_raw !== $already_done_for) {
+            $normalized = str_replace('T', ' ', $delete_raw);
+            $delete_at = DateTime::createFromFormat('Y-m-d H:i:s', $normalized, $tz) ?: DateTime::createFromFormat('Y-m-d H:i', $normalized, $tz);
+            if ($delete_at && $now >= $delete_at) {
+                $pdo->exec("TRUNCATE TABLE flohmarkt_staende");
+                flohmarkt_set_setting($pdo, 'auto_delete_executed_for', $delete_raw);
+                if ($notify_email !== '') {
+                    $body = "Hallo,\n\nwie in den Einstellungen festgelegt, wurden die Teilnehmerdaten (Name, E-Mail, Adresse, Angebote) "
+                        . "von \"" . ($settings['title'] ?? 'deinem Flohmarkt') . "\" soeben automatisch gelöscht "
+                        . "(geplant für: " . $delete_at->format('d.m.Y H:i') . " Uhr).\n\n"
+                        . "Info-Points und die allgemeinen Einstellungen sind davon nicht betroffen.";
+                    flohmarkt_send_mail($notify_email, "Flohmarkt: Teilnehmerdaten automatisch gelöscht", $body, $app_domain);
+                }
+            }
+        }
+    }
+}
+
 // --- HTML-WHITELIST-FILTER (für WYSIWYG Editor) ---
 function flohmarkt_sanitize_html(string $html): string {
     if (trim($html) === '') return '';
@@ -256,6 +342,45 @@ function flohmarkt_address_allowed(float $lat, float $lng, array $settings): boo
     return flohmarkt_point_in_polygon($lat, $lng, $polygon);
 }
 
+// Erzeugt einen abgedunkelten Farbton (für Hover-/Active-Zustände), damit die
+// frei wählbare Website-Farbe nicht überall exakt gleich aussieht.
+function flohmarkt_darken_color(string $hex, float $percent = 0.18): string {
+    $hex = ltrim($hex, '#');
+    if (!preg_match('/^[0-9a-fA-F]{6}$/', $hex)) return '#004494';
+    [$r, $g, $b] = [hexdec(substr($hex, 0, 2)), hexdec(substr($hex, 2, 2)), hexdec(substr($hex, 4, 2))];
+    $r = max(0, (int)round($r * (1 - $percent)));
+    $g = max(0, (int)round($g * (1 - $percent)));
+    $b = max(0, (int)round($b * (1 - $percent)));
+    return sprintf('#%02x%02x%02x', $r, $g, $b);
+}
+
+// Bounding-Box (kleinstes umschließendes Rechteck) des Gebiets-Polygons, um
+// die Nominatim-Adresssuche auf den tatsächlich konfigurierten Bereich
+// ("Gebiet & Karte") einzuschränken statt nur auf PLZ/Ort zu vertrauen.
+function flohmarkt_polygon_bbox(array $settings): ?array {
+    $polygon = json_decode($settings['polygon_coords'] ?? '[]', true);
+    if (!is_array($polygon) || count($polygon) < 3) return null;
+
+    $minLat = $maxLat = $minLng = $maxLng = null;
+    foreach ($polygon as $pt) {
+        if (!is_array($pt) || count($pt) !== 2) continue;
+        $lat = (float)$pt[0]; $lng = (float)$pt[1];
+        if ($minLat === null || $lat < $minLat) $minLat = $lat;
+        if ($maxLat === null || $lat > $maxLat) $maxLat = $lat;
+        if ($minLng === null || $lng < $minLng) $minLng = $lng;
+        if ($maxLng === null || $lng > $maxLng) $maxLng = $lng;
+    }
+    if ($minLat === null) return null;
+
+    // Kleinen Puffer (~300m) drumherum, damit Adressen direkt am Rand des
+    // Gebiets nicht durch Rundungsfehler aus der Suche fallen.
+    $buffer = 0.003;
+    return [
+        'minLat' => $minLat - $buffer, 'maxLat' => $maxLat + $buffer,
+        'minLng' => $minLng - $buffer, 'maxLng' => $maxLng + $buffer,
+    ];
+}
+
 // --- DATENBANK VERBINDUNG & TABELLEN ---
 try {
     $pdo = new PDO("mysql:host=$db_host;dbname=$db_name;charset=utf8mb4", $db_user, $db_pass);
@@ -315,6 +440,8 @@ try {
     $defaults = [
         'title' => 'Dorf-Flohmarkt',
         'date_text' => 'Sonntag, 20. Sept. 2026<br>10:00 - 16:00 Uhr',
+        'event_date' => '2026-09-20',
+        'theme_color' => '#0056b3',
         'allowed_plz' => '64653',
         'allowed_ort' => 'Lorsch',
         'map_lat' => '49.745472',
@@ -325,7 +452,16 @@ try {
         'impressum_text' => "<h2>Impressum</h2>\n<p>Max Mustermann<br>Musterstraße 1<br>12345 Musterdorf</p>",
         'datenschutz_text' => "<h2>Datenschutz</h2>\n<p>Wir speichern Ihre Daten nur für den Flohmarkt.</p>",
         'registration_active' => '0',
-        'registration_deadline' => '2026-09-18 23:59'
+        'registration_deadline' => '2026-09-18 23:59',
+        'auto_approve_stands' => '0',
+        'admin_notify_email' => '',
+        'admin_notify_mode' => 'off',
+        'admin_notify_interval_days' => '1',
+        'admin_notify_last_sent' => '',
+        'admin_notify_deadline_sent_for' => '',
+        'auto_delete_enabled' => '0',
+        'auto_delete_date' => '',
+        'auto_delete_executed_for' => '',
     ];
 
     $insert = $pdo->prepare("INSERT IGNORE INTO flohmarkt_settings (s_key, s_value) VALUES (?, ?)");
@@ -355,6 +491,21 @@ $settings = [];
 $stmt = $pdo->query("SELECT s_key, s_value FROM flohmarkt_settings");
 while ($row = $stmt->fetch()) {
     $settings[$row['s_key']] = $row['s_value'];
+}
+
+// Geplante Aufgaben (Benachrichtigungen, automatisches Löschen) opportunistisch
+// bei jedem Aufruf prüfen. Fehler hier dürfen die Seite nie zum Absturz bringen.
+try {
+    flohmarkt_run_scheduled_tasks($pdo, $settings, $app_domain);
+    // Nach eventuellen Änderungen (z.B. TRUNCATE, aktualisierte Zeitstempel)
+    // die Settings für den Rest des Requests neu laden.
+    $settings = [];
+    $stmt = $pdo->query("SELECT s_key, s_value FROM flohmarkt_settings");
+    while ($row = $stmt->fetch()) {
+        $settings[$row['s_key']] = $row['s_value'];
+    }
+} catch (Throwable $e) {
+    error_log('Flohmarkt Scheduler-Fehler: ' . $e->getMessage());
 }
 
 function flohmarkt_registration_status(array $settings): array {

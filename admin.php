@@ -98,7 +98,7 @@ $tab = $_GET['tab'] ?? 'staende';
 if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['save_settings'])) {
     csrf_require();
     $stmt = $pdo->prepare("INSERT INTO flohmarkt_settings (s_key, s_value) VALUES (?, ?) ON DUPLICATE KEY UPDATE s_value = VALUES(s_value)");
-    $fields = ['title', 'date_text', 'allowed_plz', 'allowed_ort', 'impressum_text', 'datenschutz_text', 'registration_deadline'];
+    $fields = ['title', 'date_text', 'event_date', 'allowed_plz', 'allowed_ort', 'impressum_text', 'datenschutz_text', 'registration_deadline'];
     $html_fields = ['date_text', 'impressum_text', 'datenschutz_text'];
 
     foreach($fields as $f) {
@@ -110,6 +110,52 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['save_settings'])) {
     }
     $reg_active_val = isset($_POST['registration_active']) ? '1' : '0';
     $stmt->execute(['registration_active', $reg_active_val]);
+
+    // Farbe der Website
+    $theme_color = trim($_POST['theme_color'] ?? '#0056b3');
+    if (!preg_match('/^#[0-9a-fA-F]{6}$/', $theme_color)) { $theme_color = '#0056b3'; }
+    $stmt->execute(['theme_color', $theme_color]);
+
+    // Automatische Freischaltung neuer Anmeldungen (nicht empfohlen, siehe Warnhinweis im Formular)
+    $auto_approve_val = isset($_POST['auto_approve_stands']) ? '1' : '0';
+    $stmt->execute(['auto_approve_stands', $auto_approve_val]);
+
+    // Admin-Benachrichtigungen per Mail
+    $notify_email = trim($_POST['admin_notify_email'] ?? '');
+    if ($notify_email !== '' && !filter_var($notify_email, FILTER_VALIDATE_EMAIL)) { $notify_email = ''; }
+    $stmt->execute(['admin_notify_email', $notify_email]);
+
+    $notify_mode = $_POST['admin_notify_mode'] ?? 'off';
+    if (!in_array($notify_mode, ['off', 'instant', 'daily'], true)) { $notify_mode = 'off'; }
+    // Wechselt der Modus neu auf "täglich", starten wir den Intervall-Zähler
+    // jetzt neu, damit nicht sofort eine Zusammenfassung über ggf. sehr alte
+    // Anmeldungen verschickt wird.
+    if ($notify_mode === 'daily' && ($settings['admin_notify_mode'] ?? 'off') !== 'daily') {
+        $tz = new DateTimeZone('Europe/Berlin');
+        $stmt->execute(['admin_notify_last_sent', (new DateTime('now', $tz))->format('Y-m-d H:i:s')]);
+    }
+    $stmt->execute(['admin_notify_mode', $notify_mode]);
+
+    $notify_interval = filter_var($_POST['admin_notify_interval_days'] ?? 1, FILTER_VALIDATE_INT, ['options' => ['min_range' => 1, 'max_range' => 7]]);
+    if ($notify_interval === false) { $notify_interval = 1; }
+    $stmt->execute(['admin_notify_interval_days', (string)$notify_interval]);
+
+    // Automatisches Löschen der Teilnehmerdaten
+    $auto_delete_val = isset($_POST['auto_delete_enabled']) ? '1' : '0';
+    $auto_delete_date = trim($_POST['auto_delete_date'] ?? '');
+    // Wird die Funktion neu aktiviert und ist noch kein Datum gesetzt,
+    // greift der Default: 1 Tag nach dem Veranstaltungsdatum.
+    if ($auto_delete_val === '1' && $auto_delete_date === '') {
+        $event_date_raw = trim($_POST['event_date'] ?? ($settings['event_date'] ?? ''));
+        $ev = DateTime::createFromFormat('Y-m-d', $event_date_raw);
+        if ($ev) {
+            $ev->modify('+1 day');
+            $auto_delete_date = $ev->format('Y-m-d\TH:i');
+        }
+    }
+    $stmt->execute(['auto_delete_enabled', $auto_delete_val]);
+    $stmt->execute(['auto_delete_date', str_replace('T', ' ', $auto_delete_date)]);
+
     header("Location: admin.php?tab=settings&msg=saved"); exit;
 }
 
@@ -470,8 +516,10 @@ $staende = $pdo->query("SELECT * FROM flohmarkt_staende ORDER BY created_at DESC
                 // Wichtig: Nominatim erlaubt KEINE Mischung aus Freitext-Suche (q=...)
                 // und strukturierten Parametern (postalcode=/city=) - das ergab bisher
                 // immer 0 Treffer. Da hier eine komplette Adresse eingegeben wird,
-                // reicht die reine Freitextsuche.
-                let url = `https://nominatim.openstreetmap.org/search?q=${encodeURIComponent(street)}&format=json&addressdetails=1&limit=5`;
+                // reicht die reine Freitextsuche - zusätzlich wird die Suche über
+                // "viewbox"/"bounded" auf das im Tab "Gebiet & Karte" gezeichnete
+                // Gebiet eingeschränkt (funktioniert mit Freitextsuche zusammen).
+                let url = `https://nominatim.openstreetmap.org/search?q=${encodeURIComponent(street)}&format=json&addressdetails=1&limit=5<?php $bbox = flohmarkt_polygon_bbox($settings); if ($bbox): ?>&viewbox=<?= $bbox['minLng'] ?>,<?= $bbox['maxLat'] ?>,<?= $bbox['maxLng'] ?>,<?= $bbox['minLat'] ?>&bounded=1<?php endif; ?>`;
                 
                 fetch(url, { headers: { 'User-Agent': 'FlohmarktApp/1.0' } })
                 .then(res => res.json())
@@ -487,7 +535,7 @@ $staende = $pdo->query("SELECT * FROM flohmarkt_staende ORDER BY created_at DESC
                     data.slice(0, 5).forEach(item => {
                         let btn = document.createElement('button');
                         btn.type = 'button'; 
-                        btn.style.cssText = 'display:block; width:100%; text-align:left; padding:6px; margin-bottom:4px; background:#fff; border:1px solid #0056b3; border-radius:3px; cursor:pointer; font-size:0.85em;';
+                        btn.style.cssText = 'display:block; width:100%; text-align:left; padding:6px; margin-bottom:4px; background:#fff; color:#222; border:1px solid #0056b3; border-radius:3px; cursor:pointer; font-size:0.85em;';
                         btn.innerText = item.display_name;
                         btn.onclick = function() {
                             document.getElementById('modal_adresse').value = item.display_name;
@@ -618,7 +666,65 @@ $staende = $pdo->query("SELECT * FROM flohmarkt_staende ORDER BY created_at DESC
                     <label>Automatische Schließung (Datum & Uhrzeit):</label>
                     <input type="datetime-local" name="registration_deadline" value="<?= str_replace(' ', 'T', $settings['registration_deadline'] ?? '') ?>">
                 </div>
+                <div class="form-group">
+                    <label>Datum des Flohmarkts selbst:</label>
+                    <input type="date" name="event_date" id="event_date_input" value="<?= htmlspecialchars($settings['event_date'] ?? '') ?>">
+                    <small style="color:#666;">Wird u.a. als Vorschlag für die automatische Löschung der Teilnehmerdaten weiter unten verwendet.</small>
+                </div>
             </fieldset>
+
+            <fieldset style="border: 1px solid #ffc107; padding: 15px; border-radius: 4px; margin-bottom: 20px; background: #fffdf5;">
+                <legend style="font-weight: bold; color: #856404; padding: 0 5px;">✅ Freischaltung neuer Stände</legend>
+                <div class="form-group" style="display: flex; align-items: center; gap: 10px; margin-top: 10px;">
+                    <input type="checkbox" name="auto_approve_stands" id="auto_approve" value="1" <?= (($settings['auto_approve_stands'] ?? '0') === '1') ? 'checked' : '' ?> style="width: 20px; height: 20px;">
+                    <label for="auto_approve" style="margin: 0; cursor: pointer;">Neue Anmeldungen automatisch auf der Karte freischalten</label>
+                </div>
+                <div class="alert" style="background:#fff3cd; color:#856404; border:1px solid #ffeeba; text-align:left; margin-top:10px;">
+                    ⚠️ <b>Nicht empfohlen:</b> Ohne manuelle Prüfung landen Anmeldungen ungefiltert und ungeprüft (auch Spam, Fehleingaben oder unpassende Inhalte) direkt sichtbar auf der öffentlichen Karte. Die Standard-Einstellung (Häkchen aus) mit manueller Freigabe im Tab „Anmeldungen" ist sicherer.
+                </div>
+            </fieldset>
+
+            <fieldset style="border: 1px solid #0056b3; padding: 15px; border-radius: 4px; margin-bottom: 20px; background: #f9fbfd;">
+                <legend style="font-weight: bold; color: #0056b3; padding: 0 5px;">📧 Admin-Benachrichtigung per Mail</legend>
+                <div class="form-group">
+                    <label>Mailadresse für Benachrichtigungen (leer lassen = deaktiviert):</label>
+                    <input type="email" name="admin_notify_email" value="<?= htmlspecialchars($settings['admin_notify_email'] ?? '') ?>" placeholder="z.B. vorstand@offene-werkstatt-gernsheim.de">
+                </div>
+                <div class="form-group">
+                    <label>Wann benachrichtigen?</label>
+                    <select name="admin_notify_mode" id="notify_mode_select">
+                        <option value="off" <?= (($settings['admin_notify_mode'] ?? 'off') === 'off') ? 'selected' : '' ?>>Aus - keine Benachrichtigungen</option>
+                        <option value="instant" <?= (($settings['admin_notify_mode'] ?? 'off') === 'instant') ? 'selected' : '' ?>>Sofort bei jeder Neuanmeldung</option>
+                        <option value="daily" <?= (($settings['admin_notify_mode'] ?? 'off') === 'daily') ? 'selected' : '' ?>>Gesammelt, alle X Tage</option>
+                    </select>
+                </div>
+                <div class="form-group" id="notify_interval_group" style="display:none;">
+                    <label>Sammel-Intervall (in Tagen, 1-7):</label>
+                    <input type="number" name="admin_notify_interval_days" min="1" max="7" value="<?= htmlspecialchars($settings['admin_notify_interval_days'] ?? '1') ?>" style="width:100px;">
+                </div>
+                <small style="color:#666;">Benachrichtigungen enthalten nur die Anzahl wartender Anmeldungen, keine persönlichen Details. Zusätzlich informiert diese Mailadresse einmalig, sobald der Anmeldeschluss oben erreicht wurde.</small>
+            </fieldset>
+
+            <fieldset style="border: 1px solid #dc3545; padding: 15px; border-radius: 4px; margin-bottom: 20px; background: #fff8f8;">
+                <legend style="font-weight: bold; color: #dc3545; padding: 0 5px;">🗑️ Automatisches Löschen der Teilnehmerdaten</legend>
+                <div class="form-group" style="display: flex; align-items: center; gap: 10px; margin-top: 10px;">
+                    <input type="checkbox" name="auto_delete_enabled" id="auto_delete" value="1" <?= (($settings['auto_delete_enabled'] ?? '0') === '1') ? 'checked' : '' ?> style="width: 20px; height: 20px;">
+                    <label for="auto_delete" style="margin: 0; cursor: pointer;">Alle Teilnehmerdaten (Name, E-Mail, Adresse, Angebote) automatisch löschen</label>
+                </div>
+                <div class="form-group" id="auto_delete_date_group">
+                    <label>Löschtermin:</label>
+                    <input type="datetime-local" name="auto_delete_date" id="auto_delete_date_input" value="<?= str_replace(' ', 'T', $settings['auto_delete_date'] ?? '') ?>">
+                    <small style="color:#666;">Leer lassen + Häkchen setzen = automatisch 1 Tag nach dem oben eingetragenen Flohmarkt-Datum. Info-Points und allgemeine Einstellungen sind davon nicht betroffen.</small>
+                </div>
+            </fieldset>
+
+            <div class="form-group">
+                <label>Farbe der Website:</label>
+                <div style="display:flex; align-items:center; gap:15px;">
+                    <input type="color" name="theme_color" value="<?= htmlspecialchars($settings['theme_color'] ?? '#0056b3') ?>" style="height:40px; width:60px;">
+                    <small style="color:#666;">Bestimmt die Hauptfarbe (Navigation, Buttons) der öffentlichen Flohmarkt-Seite.</small>
+                </div>
+            </div>
 
             <div class="form-group"><label>Name des Flohmarkts:</label><input type="text" name="title" value="<?= htmlspecialchars($settings['title'] ?? '') ?>"></div>
             <div class="form-group"><label>Datum & Uhrzeit (HTML erlaubt):</label><input type="text" name="date_text" value="<?= htmlspecialchars($settings['date_text'] ?? '') ?>"></div>
@@ -630,6 +736,29 @@ $staende = $pdo->query("SELECT * FROM flohmarkt_staende ORDER BY created_at DESC
             <div class="form-group"><label>Datenschutz-Erklärung:</label><textarea name="datenschutz_text" rows="5"><?= htmlspecialchars($settings['datenschutz_text'] ?? '') ?></textarea></div>
             <button type="submit">💾 Einstellungen speichern</button>
         </form>
+
+        <script>
+            function toggleNotifyInterval() {
+                document.getElementById('notify_interval_group').style.display =
+                    (document.getElementById('notify_mode_select').value === 'daily') ? 'block' : 'none';
+            }
+            document.getElementById('notify_mode_select').addEventListener('change', toggleNotifyInterval);
+            toggleNotifyInterval();
+
+            // Beim Aktivieren der automatischen Löschung ohne gesetztes Datum
+            // direkt einen sinnvollen Vorschlag eintragen (Flohmarkt-Datum + 1 Tag).
+            document.getElementById('auto_delete').addEventListener('change', function() {
+                var dateInput = document.getElementById('auto_delete_date_input');
+                if (this.checked && !dateInput.value) {
+                    var eventDate = document.getElementById('event_date_input').value;
+                    if (eventDate) {
+                        var d = new Date(eventDate + 'T00:00:00');
+                        d.setDate(d.getDate() + 1);
+                        dateInput.value = d.toISOString().slice(0,10) + 'T00:00';
+                    }
+                }
+            });
+        </script>
 
         <hr style="margin: 30px 0;">
 

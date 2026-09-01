@@ -102,8 +102,9 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && $page === 'anmelden') {
                 $msgType = 'error';
             } else {
                 $delete_token = bin2hex(random_bytes(16));
-                $pdo->prepare("INSERT INTO flohmarkt_staende (name, email, adresse, lat, lng, beschreibung, delete_token) VALUES (?, ?, ?, ?, ?, ?, ?)")
-                    ->execute([$name, $email, $adresse, $lat, $lng, $beschreibung, $delete_token]);
+                $auto_approve = (($settings['auto_approve_stands'] ?? '0') === '1') ? 1 : 0;
+                $pdo->prepare("INSERT INTO flohmarkt_staende (name, email, adresse, lat, lng, beschreibung, delete_token, is_approved) VALUES (?, ?, ?, ?, ?, ?, ?, ?)")
+                    ->execute([$name, $email, $adresse, $lat, $lng, $beschreibung, $delete_token, $auto_approve]);
 
                 flohmarkt_reg_register_success($pdo, $client_ip);
 
@@ -115,7 +116,22 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && $page === 'anmelden') {
                     $app_domain
                 );
 
-                $msg = "Dein Stand wurde angemeldet und wird nach Prüfung sichtbar.";
+                // Sofort-Benachrichtigung an den Admin (falls aktiviert) - ohne
+                // persönliche Details, nur der Hinweis, dass eine Anmeldung wartet.
+                if (($settings['admin_notify_mode'] ?? 'off') === 'instant' && !empty($settings['admin_notify_email'])) {
+                    flohmarkt_send_mail(
+                        $settings['admin_notify_email'],
+                        "Flohmarkt: neue Anmeldung",
+                        "Es hat sich soeben eine neue Person für \"" . ($settings['title'] ?? 'den Flohmarkt') . "\" angemeldet"
+                            . ($auto_approve ? " (automatisch freigeschaltet)." : " und wartet auf Freischaltung.")
+                            . "\n\nAdmin-Bereich: https://" . $app_domain . "/admin.php?tab=staende",
+                        $app_domain
+                    );
+                }
+
+                $msg = $auto_approve
+                    ? "Dein Stand wurde angemeldet und ist ab sofort auf der Karte sichtbar."
+                    : "Dein Stand wurde angemeldet und wird nach Prüfung sichtbar.";
                 $delete_link_show = "Lösch-Link (wurde auch per E-Mail gesendet): <br><a href='$delete_link'>$delete_link</a>";
                 $page = 'map'; 
             }
@@ -139,26 +155,30 @@ $captcha = ($page === 'anmelden' && $registration_is_open) ? flohmarkt_captcha_n
     <link href="https://cdn.quilljs.com/1.3.7/quill.snow.css" rel="stylesheet">
     <script src="https://cdn.quilljs.com/1.3.7/quill.min.js"></script>
     <style>
+        :root {
+            --theme-color: <?= htmlspecialchars($settings['theme_color'] ?? '#0056b3') ?>;
+            --theme-color-dark: <?= flohmarkt_darken_color($settings['theme_color'] ?? '#0056b3') ?>;
+        }
         body, html { margin: 0; padding: 0; font-family: sans-serif; background: #f4f4f4; height: 100dvh; display: flex; flex-direction: column; overflow-y: auto; }
-        .navbar { display: flex; background: #0056b3; color: white; flex-wrap: wrap; flex-shrink: 0; }
+        .navbar { display: flex; background: var(--theme-color); color: white; flex-wrap: wrap; flex-shrink: 0; }
         .navbar a { flex: 1; text-align: center; color: white; text-decoration: none; font-weight: bold; padding: 15px 5px; min-width: 30%; }
-        .navbar a.active { background: #004494; }
+        .navbar a.active { background: var(--theme-color-dark); }
         .container { padding: 20px; max-width: 600px; margin: 0 auto; width: 100%; box-sizing: border-box; }
         .map-container { position: relative; flex-grow: 1; width: 100%; overflow: hidden; }
         #map { height: 100%; width: 100%; z-index: 1; }
-        .map-info-box { position: absolute; bottom: 25px; left: 50%; transform: translateX(-50%); background: rgba(255, 255, 255, 0.95); padding: 12px 20px; border-radius: 20px; box-shadow: 0 4px 15px rgba(0,0,0,0.2); text-align: center; z-index: 1000; font-size: 0.9em; color: #333; width: 85%; max-width: 350px; border: 2px solid #0056b3; transition: all 0.3s ease; }
+        .map-info-box { position: absolute; bottom: 25px; left: 50%; transform: translateX(-50%); background: rgba(255, 255, 255, 0.95); padding: 12px 20px; border-radius: 20px; box-shadow: 0 4px 15px rgba(0,0,0,0.2); text-align: center; z-index: 1000; font-size: 0.9em; color: #333; width: 85%; max-width: 350px; border: 2px solid var(--theme-color); transition: all 0.3s ease; }
         .map-info-box.minimized { width: auto; padding: 8px 15px; bottom: 10px; }
         .map-info-box.minimized .info-content { display: none; }
-        .toggle-info-btn { background: none; border: none; color: #0056b3; font-size: 0.8em; cursor: pointer; font-weight: bold; margin-top: 5px; padding: 0; text-decoration: underline; }
+        .toggle-info-btn { background: none; border: none; color: var(--theme-color); font-size: 0.8em; cursor: pointer; font-weight: bold; margin-top: 5px; padding: 0; text-decoration: underline; }
         .alert { padding: 15px; margin-bottom: 20px; border-radius: 4px; text-align: center; }
         .alert.success { background: #d4edda; color: #155724; border: 1px solid #c3e6cb; }
         .alert.error { background: #f8d7da; color: #721c24; }
         .form-group { margin-bottom: 15px; }
         label { display: block; margin-bottom: 5px; font-weight: bold; }
         input[type="text"], input[type="email"], textarea { width: 100%; padding: 10px; border: 1px solid #ccc; border-radius: 4px; box-sizing: border-box; }
-        button.btn-primary { background: #0056b3; color: white; border: none; padding: 15px; width: 100%; font-size: 16px; border-radius: 4px; cursor: pointer; font-weight: bold; margin-top: 10px; }
+        button.btn-primary { background: var(--theme-color); color: white; border: none; padding: 15px; width: 100%; font-size: 16px; border-radius: 4px; cursor: pointer; font-weight: bold; margin-top: 10px; }
         button.btn-secondary { background: #6c757d; color: white; border: none; padding: 10px; border-radius: 4px; cursor: pointer; width: 120px;}
-        .addr-option { display: block; width: 100%; text-align: left; padding: 10px; margin-bottom: 5px; background: #fff; border: 1px solid #0056b3; border-radius: 4px; cursor: pointer; }
+        .addr-option { display: block; width: 100%; text-align: left; padding: 10px; margin-bottom: 5px; background: #fff; border: 1px solid var(--theme-color); border-radius: 4px; cursor: pointer; }
         #beschreibung_editor { background: white; height: 130px; }
         .ql-toolbar { background: #f8f9fa; border-top-left-radius: 4px; border-top-right-radius: 4px; }
         .ql-container { border-bottom-left-radius: 4px; border-bottom-right-radius: 4px; font-family: sans-serif; font-size: 14px; }
@@ -352,7 +372,7 @@ $captcha = ($page === 'anmelden' && $registration_is_open) ? flohmarkt_captcha_n
             if(street.length < 3) return alert("Bitte eine Straße eingeben.");
             
             this.innerText = "Lädt...";
-            let url = `https://nominatim.openstreetmap.org/search?street=${encodeURIComponent(street)}&postalcode=<?= urlencode($settings['allowed_plz']) ?>&city=<?= urlencode($settings['allowed_ort']) ?>&format=json&addressdetails=1`;
+            let url = `https://nominatim.openstreetmap.org/search?street=${encodeURIComponent(street)}&postalcode=<?= urlencode($settings['allowed_plz']) ?>&city=<?= urlencode($settings['allowed_ort']) ?>&format=json&addressdetails=1<?php $bbox = flohmarkt_polygon_bbox($settings); if ($bbox): ?>&viewbox=<?= $bbox['minLng'] ?>,<?= $bbox['maxLat'] ?>,<?= $bbox['maxLng'] ?>,<?= $bbox['minLat'] ?>&bounded=1<?php endif; ?>`;
             
             fetch(url, { headers: { 'User-Agent': 'FlohmarktApp/1.0' } })
             .then(res => res.json())
